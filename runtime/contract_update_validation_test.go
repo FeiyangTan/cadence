@@ -54,8 +54,7 @@ func TestContractUpdateValidation(t *testing.T) {
 	}
 
 	accountCode := map[common.LocationID][]byte{}
-	var events []cadence.Event
-	runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, accountCode, events)
+	runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, accountCode)
 	nextTransactionLocation := newTransactionLocationGenerator()
 
 	deployAndUpdate := func(name string, oldCode string, newCode string) error {
@@ -1639,7 +1638,6 @@ func getContractUpdateError(t *testing.T, err error) *ContractUpdateError {
 func getMockedRuntimeInterfaceForTxUpdate(
 	t *testing.T,
 	accountCodes map[common.LocationID][]byte,
-	events []cadence.Event,
 ) *testRuntimeInterface {
 
 	return &testRuntimeInterface{
@@ -1667,7 +1665,6 @@ func getMockedRuntimeInterfaceForTxUpdate(
 			return nil
 		},
 		emitEvent: func(event cadence.Event) error {
-			events = append(events, event)
 			return nil
 		},
 	}
@@ -1695,8 +1692,7 @@ func TestContractUpdateValidationDisabled(t *testing.T) {
 	}
 
 	accountCode := map[common.LocationID][]byte{}
-	var events []cadence.Event
-	runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, accountCode, events)
+	runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, accountCode)
 	nextTransactionLocation := newTransactionLocationGenerator()
 
 	deployAndUpdate := func(name string, oldCode string, newCode string) error {
@@ -1755,6 +1751,8 @@ func TestImportingDeployedCyclicContract(t *testing.T) {
 		WithContractUpdateValidationEnabled(true),
 	)
 
+	nextTransactionLocation := newTransactionLocationGenerator()
+
 	newDeployTransaction := func(function, name, code string) []byte {
 		return []byte(fmt.Sprintf(`
             transaction {
@@ -1768,12 +1766,7 @@ func TestImportingDeployedCyclicContract(t *testing.T) {
 		))
 	}
 
-	deploy := func(t *testing.T, name string, contractCode string, deployedContracts map[common.LocationID][]byte) error {
-
-		var events []cadence.Event
-		runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, deployedContracts, events)
-		nextTransactionLocation := newTransactionLocationGenerator()
-
+	deploy := func(t *testing.T, name string, contractCode string, runtimeInterface *testRuntimeInterface) error {
 		deployTx1 := newDeployTransaction(sema.AuthAccountContractsTypeAddFunctionName, name, contractCode)
 		err := runtime.ExecuteTransaction(
 			Script{
@@ -1787,7 +1780,52 @@ func TestImportingDeployedCyclicContract(t *testing.T) {
 		return err
 	}
 
-	t.Run("Two level cycle", func(t *testing.T) {
+	assertCyclicImportError := func(t *testing.T, err error) {
+		require.Error(t, err)
+
+		require.IsType(t, Error{}, err)
+		runtimeErr := err.(Error)
+
+		require.IsType(t, interpreter.Error{}, runtimeErr.Err)
+		interpreterErr := runtimeErr.Err.(interpreter.Error)
+
+		require.IsType(t, &InvalidContractDeploymentError{}, interpreterErr.Err)
+		deploymentError := interpreterErr.Err.(*InvalidContractDeploymentError)
+
+		getParsingCheckingErrorCause := func(err error) error {
+			for {
+				parsingChecking, ok := err.(*ParsingCheckingError)
+				if !ok {
+					return err
+				}
+
+				require.IsType(t, &sema.CheckerError{}, parsingChecking.Err)
+				checkerErr := parsingChecking.Err.(*sema.CheckerError)
+
+				require.Len(t, checkerErr.ChildErrors(), 1)
+				childErr := checkerErr.ChildErrors()[0]
+
+				require.IsType(t, &sema.ImportedProgramError{}, childErr)
+				importedProgErr := childErr.(*sema.ImportedProgramError)
+
+				err = importedProgErr.Err
+			}
+		}
+
+		cause := getParsingCheckingErrorCause(deploymentError.Err)
+
+		assert.IsType(t, &sema.CyclicImportsError{}, cause)
+	}
+
+	t.Run("Direct cycle", func(t *testing.T) {
+
+		deployedContracts := map[common.LocationID][]byte{
+			"A.73dd87ae00edff1e.Foo": []byte(`
+                import Foo from 0x73dd87ae00edff1e
+
+                pub contract Foo {}
+            `),
+		}
 
 		const code = `
             import Foo from 0x73dd87ae00edff1e
@@ -1795,8 +1833,47 @@ func TestImportingDeployedCyclicContract(t *testing.T) {
             pub contract Innocent {}
         `
 
-		deployedContracts := map[common.LocationID][]byte{
+		runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, deployedContracts)
+		err := deploy(t, "Innocent", code, runtimeInterface)
+		assertCyclicImportError(t, err)
+	})
 
+	t.Run("Indirect cycle", func(t *testing.T) {
+
+		deployedContracts := map[common.LocationID][]byte{
+			"A.73dd87ae00edff1e.Foo": []byte(`
+                import Bar from 0x73dd87ae00edff1e
+
+                pub contract Foo {}
+            `),
+
+			"A.73dd87ae00edff1e.Bar": []byte(`
+                import Baz from 0x73dd87ae00edff1e
+
+                pub contract Bar {}
+            `),
+
+			"A.73dd87ae00edff1e.Baz": []byte(`
+                import Foo from 0x73dd87ae00edff1e
+
+                pub contract Baz {}
+            `),
+		}
+
+		const code = `
+            import Foo from 0x73dd87ae00edff1e
+
+            pub contract Innocent {}
+        `
+
+		runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, deployedContracts)
+		err := deploy(t, "Innocent", code, runtimeInterface)
+		assertCyclicImportError(t, err)
+	})
+
+	t.Run("Cycle upon update", func(t *testing.T) {
+
+		deployedContracts := map[common.LocationID][]byte{
 			"A.73dd87ae00edff1e.Foo": []byte(`
                 import Bar from 0x73dd87ae00edff1e
 
@@ -1810,7 +1887,37 @@ func TestImportingDeployedCyclicContract(t *testing.T) {
             `),
 		}
 
-		err := deploy(t, "Innocent", code, deployedContracts)
-		require.NoError(t, err)
+		const code = `
+            pub contract Innocent {}
+        `
+
+		runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, deployedContracts)
+		err := deploy(t, "Innocent", code, runtimeInterface)
+		assert.NoError(t, err)
+
+		// Update the contract by importing the `Foo` contract that has a cycle.
+		const newCode = `
+            import Foo from 0x73dd87ae00edff1e
+
+            pub contract Innocent {}
+        `
+
+		updateTx := newDeployTransaction(
+			sema.AuthAccountContractsTypeUpdateExperimentalFunctionName,
+			"Innocent",
+			newCode,
+		)
+
+		err = runtime.ExecuteTransaction(
+			Script{
+				Source: updateTx,
+			},
+			Context{
+				Interface: runtimeInterface,
+				Location:  nextTransactionLocation(),
+			},
+		)
+
+		assertCyclicImportError(t, err)
 	})
 }
