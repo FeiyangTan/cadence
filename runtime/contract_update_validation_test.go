@@ -1746,3 +1746,71 @@ func TestContractUpdateValidationDisabled(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+func TestImportingDeployedCyclicContract(t *testing.T) {
+
+	t.Parallel()
+
+	runtime := NewInterpreterRuntime(
+		WithContractUpdateValidationEnabled(true),
+	)
+
+	newDeployTransaction := func(function, name, code string) []byte {
+		return []byte(fmt.Sprintf(`
+            transaction {
+                prepare(signer: AuthAccount) {
+                    signer.contracts.%s(name: "%s", code: "%s".decodeHex())
+                }
+            }`,
+			function,
+			name,
+			hex.EncodeToString([]byte(code)),
+		))
+	}
+
+	deploy := func(t *testing.T, name string, contractCode string, deployedContracts map[common.LocationID][]byte) error {
+
+		var events []cadence.Event
+		runtimeInterface := getMockedRuntimeInterfaceForTxUpdate(t, deployedContracts, events)
+		nextTransactionLocation := newTransactionLocationGenerator()
+
+		deployTx1 := newDeployTransaction(sema.AuthAccountContractsTypeAddFunctionName, name, contractCode)
+		err := runtime.ExecuteTransaction(
+			Script{
+				Source: deployTx1,
+			},
+			Context{
+				Interface: runtimeInterface,
+				Location:  nextTransactionLocation(),
+			},
+		)
+		return err
+	}
+
+	t.Run("Two level cycle", func(t *testing.T) {
+
+		const code = `
+            import Foo from 0x73dd87ae00edff1e
+
+            pub contract Innocent {}
+        `
+
+		deployedContracts := map[common.LocationID][]byte{
+
+			"A.73dd87ae00edff1e.Foo": []byte(`
+                import Bar from 0x73dd87ae00edff1e
+
+                pub contract Foo {}
+            `),
+
+			"A.73dd87ae00edff1e.Bar": []byte(`
+                import Foo from 0x73dd87ae00edff1e
+
+                pub contract Bar {}
+            `),
+		}
+
+		err := deploy(t, "Innocent", code, deployedContracts)
+		require.NoError(t, err)
+	})
+}
