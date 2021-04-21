@@ -966,3 +966,70 @@ type testAccountKeyStorage struct {
 	keys        []*AccountKey
 	returnedKey *AccountKey
 }
+
+func TestPublicKey(t *testing.T) {
+
+	t.Parallel()
+
+	rt := NewInterpreterRuntime()
+	runtimeInterface := &testRuntimeInterface{}
+	nextTransactionLocation := newTransactionLocationGenerator()
+
+	executeScript := func(code string) (cadence.Value, error) {
+		return rt.ExecuteScript(
+			Script{
+				Source: []byte(code),
+			},
+			Context{
+				Interface: runtimeInterface,
+				Location:  nextTransactionLocation(),
+			},
+		)
+	}
+
+	t.Run("Constructor", func(t *testing.T) {
+		script := `
+			pub fun main(): PublicKey {
+				let publicKey =  PublicKey(
+					publicKey: "0102".decodeHex(),
+					signatureAlgorithm: SignatureAlgorithm.ECDSA_P256
+				)
+
+				return publicKey
+			}
+		`
+
+		value, err := executeScript(script)
+		require.NoError(t, err)
+
+		expected := cadence.Struct{
+			StructType: PublicKeyType,
+			Fields: []cadence.Value{
+				// Public key (bytes)
+				newBytesValue([]byte{1, 2}),
+
+				// Signature Algo
+				newSignAlgoValue(sema.SignatureAlgorithmECDSA_P256),
+			},
+		}
+
+		assert.Equal(t, expected, value)
+	})
+
+	t.Run("Validate method", func(t *testing.T) {
+		script := `
+			pub fun main(): Bool {
+				let publicKey =  PublicKey(
+					publicKey: "0102".decodeHex(),
+					signatureAlgorithm: SignatureAlgorithm.ECDSA_P256
+				)
+
+				return publicKey.validate()
+			}
+		`
+
+		value, err := executeScript(script)
+		require.NoError(t, err)
+		assert.Equal(t, cadence.Bool(true), value)
+	})
+}

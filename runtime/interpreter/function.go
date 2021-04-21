@@ -133,6 +133,7 @@ type HostFunction func(invocation Invocation) Value
 type HostFunctionValue struct {
 	Function        HostFunction
 	NestedVariables *StringVariableOrderedMap
+	Self            *CompositeValue
 }
 
 func (f HostFunctionValue) String() string {
@@ -187,6 +188,10 @@ func (HostFunctionValue) SetModified(_ bool) {
 func (HostFunctionValue) isFunctionValue() {}
 
 func (f HostFunctionValue) Invoke(invocation Invocation) Value {
+	if invocation.Self == nil {
+		invocation.Self = f.Self
+	}
+
 	return f.Function(invocation)
 }
 
